@@ -1,0 +1,55 @@
+appId: ru.implica.trackit
+---
+# Test: Email-first auth → login → tap issue → should NOT redirect to login
+
+# Step 1: Should see email entry or tabs (if already logged in)
+- assertVisible:
+    text: ".*"
+    optional: true
+
+# Step 2: If email entry visible, enter email
+- runFlow:
+    when:
+      visible: "Продолжить"
+    commands:
+      - tapOn: "Email"
+      - inputText: "dp.bondar@gmail.com"
+      - tapOn: "Продолжить"
+      - waitForAnimationToEnd
+
+# Step 3: If login form visible, enter password
+- runFlow:
+    when:
+      visible: "Войти"
+    commands:
+      - tapOn:
+          text: ".*password.*"
+          optional: true
+      - inputText: "DpBondar2026!"
+      - tapOn: "Войти"
+      - waitForAnimationToEnd
+
+# Step 4: Wait for home screen
+- extendedWaitUntil:
+    visible: "Projects"
+    timeout: 30000
+
+# Step 5: Take screenshot before tap
+- takeScreenshot: before-tap
+
+# Step 6: Tap on first project/issue
+- tapOn:
+    index: 0
+    text: "TRKIT.*"
+    optional: true
+
+- waitForAnimationToEnd
+
+# Step 7: Take screenshot after tap
+- takeScreenshot: after-tap
+
+# Step 8: Should NOT see email entry or portal login
+- assertNotVisible:
+    text: "Отправить код"
+- assertNotVisible:
+    text: "Портал поддержки"
