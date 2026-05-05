@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "TrackIT",
-    "slug": "trackit-mobile",
+    "slug": "trackit-stalk-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -12,37 +12,18 @@
       "resizeMode": "contain",
       "backgroundColor": "#3F76FF"
     },
-    "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "ru.implica.trackit",
-      "buildNumber": "36",
-      "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
-      }
-    },
-    "android": {
-      "package": "ru.implica.trackit",
-      "adaptiveIcon": {
-        "backgroundColor": "#3F76FF",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
-    },
     "web": {
       "favicon": "./assets/favicon.png",
-      "bundler": "metro"
+      "bundler": "metro",
+      "output": "static",
+      "build": {
+        "babel": {
+          "include": ["@expo/vector-icons"]
+        }
+      }
     },
     "plugins": [
-      "expo-router",
-      "expo-secure-store",
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/icon.png",
-          "sounds": []
-        }
-      ]
+      "expo-router"
     ]
   }
 }
