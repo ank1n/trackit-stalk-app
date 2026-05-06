@@ -1,5 +1,5 @@
-// TrackIT Mobile API — session cookie auth
-import * as SecureStore from "expo-secure-store";
+// TrackIT API — session cookie auth (web-only via storage-web shim)
+import { SecureStore } from "./storage-web";
 
 const BASE_URL = "https://trackit.implica.ru";
 const WORKSPACE = "implica";
@@ -90,9 +90,45 @@ export async function loginWithKeycloak(email: string, password: string): Promis
   }
 }
 
+/**
+ * Exchange a Keycloak access_token (provided by sTalk parent via postMessage)
+ * for a Plane session cookie. The token must be issued by KC realm `plane`
+ * — the same realm TrackIT uses. If parent has a different-realm token
+ * (e.g. `matrix`), it must obtain a `plane`-realm token via token-exchange
+ * grant before forwarding here.
+ */
+export async function exchangeStalkSession(planeRealmAccessToken: string): Promise<{ ok: boolean; user?: any; error?: string }> {
+  try {
+    const csrfRes = await fetch(`${BASE_URL}/api/config/`, { credentials: "include" });
+    const csrfCookie = csrfRes.headers.get("set-cookie")?.match(/csrftoken=([^;]+)/)?.[1] || "";
+
+    const authRes = await fetch(`${BASE_URL}/api/v1/mobile/auth/oidc/`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Referer": `${BASE_URL}/`,
+        "X-CSRFToken": csrfCookie,
+      },
+      credentials: "include",
+      body: JSON.stringify({ access_token: planeRealmAccessToken }),
+    });
+    if (!authRes.ok) {
+      const errBody = await authRes.text().catch(() => "");
+      return { ok: false, error: `Не удалось создать сессию (${authRes.status}: ${errBody.substring(0, 200)})` };
+    }
+    const data = await authRes.json();
+    if (!data.session_id) return { ok: false, error: "Сессия не получена от сервера" };
+    await saveSession(data.session_id, data.csrf_token || "");
+    invalidateAuthCache();
+    return { ok: true, user: data.user };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Ошибка подключения" };
+  }
+}
+
 // ==================== CACHE LAYER ====================
 
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import AsyncStorage from "./storage-web";
 
 const CACHE_PREFIX = "api_cache_";
 const CACHE_TTL = 30 * 60 * 1000; // 30 min
@@ -187,16 +223,18 @@ async function apiFetch(path: string, options?: RequestInit): Promise<any> {
     if (_inFlight[path]) return _inFlight[path];
   }
 
+  // Browser sets Cookie automatically via cookie jar (credentials:"include").
+  // Manual Cookie header is forbidden in fetch — silently dropped.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...(cookie ? { Cookie: cookie } : {}),
     ...(csrf && !isGet ? { "X-CSRFToken": csrf } : {}),
     ...(options?.headers as Record<string, string> || {}),
   };
+  void cookie; // kept for parity with mobile flow / debug logging
 
   const doFetch = async () => {
     try {
-      const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+      const res = await fetch(`${BASE_URL}${path}`, { ...options, headers, credentials: "include" });
       if (!res.ok) {
         if (res.status === 403) {
           console.warn(`[apiFetch] 403 Forbidden: ${path}`);
@@ -267,25 +305,21 @@ export type TAttachment = { id: string; asset_url?: string; asset?: string; attr
 
 export function issueStateId(issue: TIssue): string { return issue.state_id || issue.state || ""; }
 
-// Download file with session cookie → returns base64 data URI
+// Download file with session cookie → returns base64 data URI.
+// Web: browser attaches cookies automatically (credentials:"include"); the
+// manual Cookie header is forbidden in fetch and silently dropped.
 export async function fetchImageBase64(assetUrl: string): Promise<string | null> {
-  const cookie = await getSessionCookie();
-  return new Promise((resolve) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("GET", `${BASE_URL}${assetUrl}`, true);
-    xhr.responseType = "arraybuffer";
-    if (cookie) xhr.setRequestHeader("Cookie", cookie);
-    xhr.onload = () => {
-      if (xhr.status < 200 || xhr.status >= 300) { resolve(null); return; }
-      const bytes = new Uint8Array(xhr.response);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      const b64 = btoa(binary);
-      resolve(b64);
-    };
-    xhr.onerror = () => resolve(null);
-    xhr.send();
-  });
+  try {
+    const res = await fetch(`${BASE_URL}${assetUrl}`, { credentials: "include" });
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchImageAsDataUri(assetUrl: string): Promise<string | null> {
@@ -432,15 +466,17 @@ export async function fetchAttachments(projectId: string, issueId: string): Prom
   return apiFetch(`/api/workspaces/${WORKSPACE}/projects/${projectId}/issues/${issueId}/mobile-attachments/`);
 }
 
-export async function uploadAttachment(projectId: string, issueId: string, uri: string, fileName: string): Promise<TAttachment> {
-  const cookie = await getSessionCookie();
+// Web upload — accept Blob/File (from <input type="file"> or drag-drop)
+// instead of RN's {uri, name, type} shape.
+export async function uploadAttachment(projectId: string, issueId: string, file: Blob, fileName: string): Promise<TAttachment> {
   const csrf = await SecureStore.getItemAsync(CSRF_KEY);
   const formData = new FormData();
-  formData.append("asset", { uri, name: fileName, type: /\.png$/i.test(fileName) ? "image/png" : "image/jpeg" } as any);
+  formData.append("asset", file, fileName);
 
+  const headers: Record<string, string> = csrf ? { "X-CSRFToken": csrf } : {};
   const res = await fetch(
     `${BASE_URL}/api/workspaces/${WORKSPACE}/projects/${projectId}/issues/${issueId}/mobile-attachments/`,
-    { method: "POST", body: formData, headers: { Cookie: cookie, ...(csrf ? { "X-CSRFToken": csrf } : {}) } }
+    { method: "POST", body: formData, headers, credentials: "include" }
   );
   if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
   return res.json();
